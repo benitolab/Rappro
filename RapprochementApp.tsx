@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Upload, ArrowRight, CheckCircle, AlertCircle, FileText, RefreshCw, Download, Settings, ChevronRight, Check, Layers, X, Search, FileSpreadsheet } from 'lucide-react';
+import { Upload, ArrowRight, CheckCircle, AlertCircle, FileText, RefreshCw, Download, Settings, ChevronRight, Check, Layers, X, Search, FileSpreadsheet, Trash2 } from 'lucide-react';
 
 // --- Utilitaires ---
 
@@ -341,7 +341,7 @@ export default function RapprochementApp() {
         const amountDiff = Math.abs(bItem.amount - aItem.amount);
         const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
 
-        return amountDiff < 0.02 && dateDiff <= settings.dayTolerance;
+        return amountDiff < 0.005 && dateDiff <= settings.dayTolerance;
       });
 
       if (matchIndex !== -1) {
@@ -351,6 +351,7 @@ export default function RapprochementApp() {
           type: '1-1',
           bank: bItem,
           relatedBankIds: [bItem.id], // NEW: Track source ID
+          bankItems: [bItem],
           accItems: [normAcc[matchIndex]],
           deltaDays: Math.floor(Math.abs(bItem.date.getTime() - normAcc[matchIndex].date.getTime()) / (1000 * 60 * 60 * 24))
         });
@@ -381,7 +382,7 @@ export default function RapprochementApp() {
 
           const amountDiff = Math.abs(bItem.amount - groupSum);
 
-          if (amountDiff < 0.02) {
+          if (amountDiff < 0.005) {
             bItem.matched = true;
             group.forEach((g: any) => g.matched = true);
 
@@ -389,6 +390,7 @@ export default function RapprochementApp() {
               type: '1-N',
               bank: bItem,
               relatedBankIds: [bItem.id], // NEW: Track source ID
+              bankItems: [bItem],
               accItems: group,
               deltaDays: Math.floor(Math.abs(bItem.date.getTime() - group[0].date.getTime()) / (1000 * 60 * 60 * 24))
             });
@@ -516,7 +518,7 @@ export default function RapprochementApp() {
 
     const { totalBank, totalAcc } = selectionTotals;
 
-    if (Math.abs(totalBank - totalAcc) > 0.02) return;
+    if (Math.abs(totalBank - totalAcc) > 0.005) return;
 
     // Création de la transaction banque représentative
     let representativeBank = selectedBank[0];
@@ -543,6 +545,7 @@ export default function RapprochementApp() {
       type: 'Manuel',
       bank: representativeBank,
       relatedBankIds: relatedBankIds, // NEW: Track all involved bank IDs
+      bankItems: selectedBank,
       accItems: selectedAcc,
       deltaDays: 0
     };
@@ -553,6 +556,19 @@ export default function RapprochementApp() {
       unmatchedAcc: prev.unmatchedAcc.filter(t => !selectedIds.has(t.id))
     }));
     setSelectedIds(new Set());
+  };
+
+  const handleUnmatch = (match: any) => {
+    const bankItemsToRestore = match.bankItems || (match.bank ? [match.bank] : []);
+
+    bankItemsToRestore.forEach((i: any) => i.matched = false);
+    match.accItems.forEach((i: any) => i.matched = false);
+
+    setResults(prev => ({
+      matches: prev.matches.filter(m => m !== match),
+      unmatchedBank: [...prev.unmatchedBank, ...bankItemsToRestore].sort((a: any, b: any) => a.date.getTime() - b.date.getTime()),
+      unmatchedAcc: [...prev.unmatchedAcc, ...match.accItems].sort((a: any, b: any) => a.date.getTime() - b.date.getTime())
+    }));
   };
 
   // --- Filtering Logic ---
@@ -840,6 +856,7 @@ export default function RapprochementApp() {
                       <th className="px-4 py-3 text-center">Type</th>
                       <th className="px-4 py-3">Détail Compta</th>
                       <th className="px-4 py-3 text-right">Montant</th>
+                      <th className="px-4 py-3 w-10"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -877,6 +894,11 @@ export default function RapprochementApp() {
                           )}
                         </td>
                         <td className="px-4 py-2 text-right font-mono font-medium text-emerald-700 align-top pt-3">{formatCurrency(m.bank.amount)}</td>
+                        <td className="px-4 py-2 text-center align-top pt-2">
+                          <button onClick={() => handleUnmatch(m)} className="text-slate-400 hover:text-red-500 transition-colors p-1" title="Supprimer ce rapprochement">
+                            <Trash2 size={16} />
+                          </button>
+                        </td>
                       </tr>
                     ))}
                     {filteredMatches.length === 0 && (
@@ -910,12 +932,12 @@ export default function RapprochementApp() {
                 <div className="h-8 w-px bg-slate-700"></div>
                 <div className="flex flex-col mr-2">
                   <span className="text-xs text-slate-400 uppercase font-semibold">Écart</span>
-                  <span className={`font-mono font-bold text-lg ${Math.abs(selectionTotals.totalBank - selectionTotals.totalAcc) < 0.02 ? 'text-emerald-400' : 'text-orange-400'}`}>
+                  <span className={`font-mono font-bold text-lg ${Math.abs(selectionTotals.totalBank - selectionTotals.totalAcc) < 0.005 ? 'text-emerald-400' : 'text-orange-400'}`}>
                     {formatCurrency(selectionTotals.totalBank - selectionTotals.totalAcc)}
                   </span>
                 </div>
 
-                {Math.abs(selectionTotals.totalBank - selectionTotals.totalAcc) < 0.02 && (
+                {Math.abs(selectionTotals.totalBank - selectionTotals.totalAcc) < 0.005 && (
                   <button
                     onClick={handleManualMatch}
                     className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-colors animate-in zoom-in"
