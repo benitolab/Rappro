@@ -1,5 +1,0 @@
-{
-  "name": "ReconcileAI - Rapprochement Bancaire",
-  "description": "Application intelligente de rapprochement bancaire utilisant Gemini pour détecter les correspondances exactes et les regroupements d'écritures complexes.",
-  "requestFramePermissions": []
-}
