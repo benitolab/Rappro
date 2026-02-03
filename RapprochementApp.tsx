@@ -273,15 +273,51 @@ export default function RapprochementApp() {
     unmatchedAcc: []
   });
 
-  // Selection State
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [ignoredIds, setIgnoredIds] = useState<Set<string>>(new Set()); // NEW: Track ignored items
+  const [ignoredIds, setIgnoredIds] = useState<Set<string>>(new Set());
+  const [isAccGroupedByDate, setIsAccGroupedByDate] = useState(false); // NEW: Toggle grouping
 
   // Search State
   const [searchQuery, setSearchQuery] = useState("");
 
-  const handleBankLoad = (data: any[], name: string) => { setBankData(data); setBankFileName(name); };
-  const handleAccLoad = (data: any[], name: string) => { setAccData(data); setAccFileName(name); };
+  // Helper Auto-Mapping
+  const performAutoMapping = (data: any[], currentMapping: any) => {
+    if (!data || data.length === 0) return currentMapping;
+    const headers = Object.keys(data[0]).filter(k => k !== '_id');
+    const newMapping = { ...currentMapping };
+
+    // Simple heuristics
+    const findCol = (keywords: string[]) => headers.find(h => keywords.some(k => h.toLowerCase().includes(k))) || '';
+
+    if (!newMapping.date) newMapping.date = findCol(['date', 'jour', 'dt']);
+    if (!newMapping.label) newMapping.label = findCol(['libellé', 'libelle', 'label', 'description', 'ref', 'référence']);
+
+    // Amount strategy: try 'credit'/'debit' first for split mode, else 'montant'
+    const debitCol = findCol(['debit', 'débit']);
+    const creditCol = findCol(['credit', 'crédit']);
+    const amountCol = findCol(['montant', 'solde', 'amount']);
+
+    if (debitCol && creditCol) {
+      newMapping.mode = 'split';
+      newMapping.debit = debitCol;
+      newMapping.credit = creditCol;
+    } else {
+      newMapping.mode = 'single';
+      newMapping.amount = amountCol;
+    }
+    return newMapping;
+  };
+
+  const handleBankLoad = (data: any[], name: string) => {
+    setBankData(data);
+    setBankFileName(name);
+    setBankMapping(prev => performAutoMapping(data, prev));
+  };
+  const handleAccLoad = (data: any[], name: string) => {
+    setAccData(data);
+    setAccFileName(name);
+    setAccMapping(prev => performAutoMapping(data, prev));
+  };
 
   const cleanAmount = (val: any) => {
     if (typeof val !== 'string') return typeof val === 'number' ? val : 0;
@@ -319,8 +355,6 @@ export default function RapprochementApp() {
       id: 'bank-' + row._id, // Préfixe pour unicité
       date: parseDate(row[bankMapping.date]),
       amount: getRowAmount(row, bankMapping),
-      label: bankMapping.label ? row[bankMapping.label] : 'Sans libellé',
-      matched: false
       label: bankMapping.label ? row[bankMapping.label] : 'Sans libellé',
       matched: false
     })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has('bank-' + row._id));
@@ -1089,12 +1123,21 @@ export default function RapprochementApp() {
                 </div>
               </Card>
 
-              {/* Ecarts Compta */}
+              {/* Ecarts Comptabilité */}
               <Card className="flex flex-col h-96">
                 <div className="p-4 border-b border-slate-100 bg-slate-50 rounded-t-xl flex justify-between items-center">
-                  <h3 className="font-bold text-slate-700">Écarts Comptabilité ({filteredUnmatchedAcc.length})</h3>
-                  <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">En attente</span>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-slate-700">Écarts Comptabilité ({filteredUnmatchedAcc.length})</h3>
+                    <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">En attente</span>
+                  </div>
+                  <button
+                    onClick={() => setIsAccGroupedByDate(!isAccGroupedByDate)}
+                    className={`text-xs px-2 py-1 rounded border ${isAccGroupedByDate ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'bg-white border-slate-300 text-slate-600'}`}
+                  >
+                    {isAccGroupedByDate ? 'Vue Liste' : 'Grouper par Date'}
+                  </button>
                 </div>
+
                 <div className="overflow-auto flex-1 p-0">
                   <table className="w-full text-sm text-left">
                     <thead className="text-xs text-slate-500 uppercase bg-slate-50 sticky top-0 z-10">
@@ -1106,16 +1149,61 @@ export default function RapprochementApp() {
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredUnmatchedAcc.map((item, idx) => (
-                        <tr key={idx} className={`border-b border-slate-100 hover:bg-slate-50 ${selectedIds.has(item.id) ? 'bg-indigo-50' : ''}`}>
-                          <td className="px-4 py-2">
-                            <input type="checkbox" checked={selectedIds.has(item.id)} onChange={() => toggleSelection(item.id)} className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4 cursor-pointer" />
-                          </td>
-                          <td className="px-4 py-2 whitespace-nowrap">{item.date.toLocaleDateString()}</td>
-                          <td className="px-4 py-2 truncate max-w-xs" title={item.label}>{item.label}</td>
-                          <td className="px-4 py-2 text-right font-medium">{formatCurrency(item.amount)}</td>
-                        </tr>
-                      ))}
+                      {isAccGroupedByDate ? (
+                        // Vue Groupée
+                        Object.entries(filteredUnmatchedAcc.reduce((acc: any, item: any) => {
+                          const key = item.date.toLocaleDateString();
+                          if (!acc[key]) acc[key] = [];
+                          acc[key].push(item);
+                          return acc;
+                        }, {})).map(([date, items]: [string, any[]]) => (
+                          <React.Fragment key={date}>
+                            <tr className="bg-slate-100 border-y border-slate-200">
+                              <td className="px-4 py-2 font-bold text-slate-700" colSpan={4}>
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="checkbox"
+                                    className="rounded text-indigo-600 cursor-pointer"
+                                    checked={items.every(i => selectedIds.has(i.id))}
+                                    onChange={(e) => {
+                                      const newSet = new Set(selectedIds);
+                                      items.forEach(i => {
+                                        if (e.target.checked) newSet.add(i.id);
+                                        else newSet.delete(i.id);
+                                      });
+                                      setSelectedIds(newSet);
+                                    }}
+                                  />
+                                  <span>{date} ({items.length} écritures)</span>
+                                  <span className="ml-auto font-mono text-xs font-normal">Total: {formatCurrency(items.reduce((s: number, i: any) => s + i.amount, 0))}</span>
+                                </div>
+                              </td>
+                            </tr>
+                            {items.map((item, idx) => (
+                              <tr key={item.id} className={`border-b border-slate-100 hover:bg-slate-50 ${selectedIds.has(item.id) ? 'bg-indigo-50' : ''}`}>
+                                <td className="px-4 py-2 pl-8">
+                                  <input type="checkbox" checked={selectedIds.has(item.id)} onChange={() => toggleSelection(item.id)} className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4 cursor-pointer" />
+                                </td>
+                                <td className="px-4 py-2 whitespace-nowrap opacity-50 text-xs">"</td>
+                                <td className="px-4 py-2 truncate max-w-xs" title={item.label}>{item.label}</td>
+                                <td className="px-4 py-2 text-right font-medium">{formatCurrency(item.amount)}</td>
+                              </tr>
+                            ))}
+                          </React.Fragment>
+                        ))
+                      ) : (
+                        // Vue Liste Simple (Standard)
+                        filteredUnmatchedAcc.map((item, idx) => (
+                          <tr key={idx} className={`border-b border-slate-100 hover:bg-slate-50 ${selectedIds.has(item.id) ? 'bg-indigo-50' : ''}`}>
+                            <td className="px-4 py-2">
+                              <input type="checkbox" checked={selectedIds.has(item.id)} onChange={() => toggleSelection(item.id)} className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4 cursor-pointer" />
+                            </td>
+                            <td className="px-4 py-2 whitespace-nowrap">{item.date.toLocaleDateString()}</td>
+                            <td className="px-4 py-2 truncate max-w-xs" title={item.label}>{item.label}</td>
+                            <td className="px-4 py-2 text-right font-medium">{formatCurrency(item.amount)}</td>
+                          </tr>
+                        ))
+                      )}
                       {filteredUnmatchedAcc.length === 0 && (
                         <tr><td colSpan={4} className="p-8 text-center text-slate-400">Aucun résultat.</td></tr>
                       )}
