@@ -331,6 +331,45 @@ export default function RapprochementApp() {
       matched: false
     })).filter(item => Math.abs(item.amount) > 0.01);
 
+    // --- PASSE 0 : Matches Spécifiques (EVI / Notre Virement) ---
+    // Demande utilisateur : "FICHIER EVI REMISE EN BANQUE" correspond à "NOTRE VIREMENT"
+    normBank.forEach(bItem => {
+      if (bItem.matched) return;
+
+      const matchIndex = normAcc.findIndex(aItem => {
+        if (aItem.matched) return false;
+
+        // Condition 1: Montant et Date
+        const amountDiff = Math.abs(bItem.amount - aItem.amount);
+        const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
+
+        if (amountDiff > 0.005 || dateDiff > settings.dayTolerance) return false;
+
+        // Condition 2: Libellés Spécifiques
+        const bLabel = bItem.label.toUpperCase();
+        const aLabel = aItem.label.toUpperCase();
+        const isEvi = (l: string) => l.includes('EVI') || l.includes('REMISE');
+        const isNotreVirement = (l: string) => l.includes('NOTRE VIREMENT');
+
+        if ((isEvi(bLabel) && isNotreVirement(aLabel)) || (isNotreVirement(bLabel) && isEvi(aLabel))) return true;
+
+        return false;
+      });
+
+      if (matchIndex !== -1) {
+        normAcc[matchIndex].matched = true;
+        bItem.matched = true;
+        matches.push({
+          type: 'Specifique',
+          bank: bItem,
+          relatedBankIds: [bItem.id],
+          bankItems: [bItem],
+          accItems: [normAcc[matchIndex]],
+          deltaDays: Math.floor(Math.abs(bItem.date.getTime() - normAcc[matchIndex].date.getTime()) / (1000 * 60 * 60 * 24))
+        });
+      }
+    });
+
     // --- PASSE 1 : Matching 1 pour 1 (Exact) ---
     normBank.forEach(bItem => {
       if (bItem.matched) return;
@@ -406,6 +445,126 @@ export default function RapprochementApp() {
 
     setResults({ matches, unmatchedBank, unmatchedAcc });
     setStep(3);
+    setResults({ matches, unmatchedBank, unmatchedAcc });
+    setStep(3);
+  };
+
+  const handleIncrementalMatch = () => {
+    // Copie profonde pour ne pas muter l'état directement pendant le calcul
+    // On utilise JSON parse/stringify pour simplicité sur des objets simples, mais attention aux Dates.
+    // Mieux vaut reconstruire proprement ou juste traiter comme des objets.
+    // Ici, on va iterer sur les tableaux existants `results.unmatchedBank` et `results.unmatchedAcc`.
+
+    // IMPORTANT: Les objets dans unmatchedBank/Acc ont déjà des Dates parsées.
+    // Si on clone via JSON, on perd les Dates. On va cloner via map.
+
+    let currentUnmatchedBank = results.unmatchedBank.map(item => ({ ...item, matched: false }));
+    let currentUnmatchedAcc = results.unmatchedAcc.map(item => ({ ...item, matched: false }));
+
+    const newMatches: any[] = [];
+
+    // --- LOGIQUE DE MATCHING (Répliquée/Adaptée) ---
+
+    // PASSE 0 : Matches Spécifiques
+    currentUnmatchedBank.forEach(bItem => {
+      if (bItem.matched) return;
+      const matchIndex = currentUnmatchedAcc.findIndex(aItem => {
+        if (aItem.matched) return false;
+        const amountDiff = Math.abs(bItem.amount - aItem.amount);
+        const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
+        if (amountDiff > 0.005 || dateDiff > settings.dayTolerance) return false;
+
+        const bLabel = bItem.label.toUpperCase();
+        const aLabel = aItem.label.toUpperCase();
+        const isEvi = (l: string) => l.includes('EVI') || l.includes('REMISE');
+        const isNotreVirement = (l: string) => l.includes('NOTRE VIREMENT');
+
+        if ((isEvi(bLabel) && isNotreVirement(aLabel)) || (isNotreVirement(bLabel) && isEvi(aLabel))) return true;
+        return false;
+      });
+      if (matchIndex !== -1) {
+        currentUnmatchedAcc[matchIndex].matched = true;
+        bItem.matched = true;
+        newMatches.push({
+          type: 'Specifique (Relance)',
+          bank: bItem,
+          relatedBankIds: [bItem.id],
+          bankItems: [bItem],
+          accItems: [currentUnmatchedAcc[matchIndex]],
+          deltaDays: Math.floor(Math.abs(bItem.date.getTime() - currentUnmatchedAcc[matchIndex].date.getTime()) / (1000 * 60 * 60 * 24))
+        });
+      }
+    });
+
+    // PASSE 1 : Exact 1-1
+    currentUnmatchedBank.forEach(bItem => {
+      if (bItem.matched) return;
+      const matchIndex = currentUnmatchedAcc.findIndex(aItem => {
+        if (aItem.matched) return false;
+        const amountDiff = Math.abs(bItem.amount - aItem.amount);
+        const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
+        return amountDiff < 0.005 && dateDiff <= settings.dayTolerance;
+      });
+      if (matchIndex !== -1) {
+        currentUnmatchedAcc[matchIndex].matched = true;
+        bItem.matched = true;
+        newMatches.push({
+          type: '1-1 (Relance)',
+          bank: bItem,
+          relatedBankIds: [bItem.id],
+          bankItems: [bItem],
+          accItems: [currentUnmatchedAcc[matchIndex]],
+          deltaDays: Math.floor(Math.abs(bItem.date.getTime() - currentUnmatchedAcc[matchIndex].date.getTime()) / (1000 * 60 * 60 * 24))
+        });
+      }
+    });
+
+    // PASSE 2 : Groupé
+    currentUnmatchedBank.forEach(bItem => {
+      if (bItem.matched) return;
+      const candidates = currentUnmatchedAcc.filter(aItem => {
+        if (aItem.matched) return false;
+        const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
+        return dateDiff <= settings.dayTolerance;
+      });
+      if (candidates.length > 1) {
+        const groupsByDate: any = {};
+        candidates.forEach(c => {
+          const dateKey = c.date.toDateString();
+          if (!groupsByDate[dateKey]) groupsByDate[dateKey] = [];
+          groupsByDate[dateKey].push(c);
+        });
+        for (const dateKey in groupsByDate) {
+          const group = groupsByDate[dateKey];
+          const groupSum = group.reduce((sum: number, item: any) => sum + item.amount, 0);
+          const amountDiff = Math.abs(bItem.amount - groupSum);
+          if (amountDiff < 0.005) {
+            bItem.matched = true;
+            group.forEach((g: any) => g.matched = true);
+            newMatches.push({
+              type: '1-N (Relance)',
+              bank: bItem,
+              relatedBankIds: [bItem.id],
+              bankItems: [bItem],
+              accItems: group,
+              deltaDays: Math.floor(Math.abs(bItem.date.getTime() - group[0].date.getTime()) / (1000 * 60 * 60 * 24))
+            });
+            break;
+          }
+        }
+      }
+    });
+
+    if (newMatches.length === 0) {
+      alert("Aucun nouveau rapprochement trouvé avec ces paramètres.");
+      return;
+    }
+
+    setResults(prev => ({
+      matches: [...newMatches, ...prev.matches],
+      unmatchedBank: currentUnmatchedBank.filter(b => !b.matched),
+      unmatchedAcc: currentUnmatchedAcc.filter(a => !a.matched)
+    }));
   };
 
   const exportCSV = () => {
@@ -737,6 +896,26 @@ export default function RapprochementApp() {
               />
             </div>
 
+            {/* Incremental Matching Toolbar */}
+            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-wrap items-center gap-4">
+              <div className="flex items-center gap-2 text-indigo-900 font-medium">
+                <RefreshCw size={20} />
+                <span>Options de Rapprochement :</span>
+              </div>
+              <div className="flex items-center gap-3 border-l pl-4 border-slate-200">
+                <label className="text-sm font-medium text-slate-600">Tolérance Date (jours)</label>
+                <input
+                  type="number"
+                  value={settings.dayTolerance}
+                  onChange={(e) => setSettings({ ...settings, dayTolerance: parseInt(e.target.value) || 0 })}
+                  className="w-16 p-2 border border-slate-300 rounded text-center"
+                />
+              </div>
+              <Button variant="primary" onClick={handleIncrementalMatch} icon={Layers}>
+                Relancer sur les écarts restants
+              </Button>
+            </div>
+
             {/* KPI Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Card className="p-6 flex items-center justify-between bg-emerald-50 border-emerald-200">
@@ -956,6 +1135,6 @@ export default function RapprochementApp() {
         )}
 
       </div>
-    </div>
+    </div >
   );
 }
