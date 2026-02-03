@@ -275,6 +275,7 @@ export default function RapprochementApp() {
 
   // Selection State
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [ignoredIds, setIgnoredIds] = useState<Set<string>>(new Set()); // NEW: Track ignored items
 
   // Search State
   const [searchQuery, setSearchQuery] = useState("");
@@ -320,7 +321,9 @@ export default function RapprochementApp() {
       amount: getRowAmount(row, bankMapping),
       label: bankMapping.label ? row[bankMapping.label] : 'Sans libellé',
       matched: false
-    })).filter(item => Math.abs(item.amount) > 0.01);
+      label: bankMapping.label ? row[bankMapping.label] : 'Sans libellé',
+      matched: false
+    })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has('bank-' + row._id));
 
     const normAcc = accData.map(row => ({
       original: row,
@@ -329,46 +332,90 @@ export default function RapprochementApp() {
       amount: getRowAmount(row, accMapping) * (settings.invertAccSign ? -1 : 1),
       label: accMapping.label ? row[accMapping.label] : 'Sans libellé',
       matched: false
-    })).filter(item => Math.abs(item.amount) > 0.01);
+    })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has('acc-' + row._id));
 
     // --- PASSE 0 : Matches Spécifiques (EVI / Notre Virement) ---
     // Demande utilisateur : "FICHIER EVI REMISE EN BANQUE" correspond à "NOTRE VIREMENT"
+    // Supporte 1-1 et 1-to-N avec tolérance 5 jours
     normBank.forEach(bItem => {
       if (bItem.matched) return;
 
-      const matchIndex = normAcc.findIndex(aItem => {
-        if (aItem.matched) return false;
+      const isEvi = (l: string) => l.toUpperCase().includes('EVI') || l.toUpperCase().includes('REMISE');
+      const isNotreVirement = (l: string) => l.toUpperCase().includes('NOTRE VIREMENT');
 
-        // Condition 1: Montant et Date
-        const amountDiff = Math.abs(bItem.amount - aItem.amount);
-        const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
+      const bLabel = bItem.label.toUpperCase();
 
-        if (amountDiff > 0.005 || dateDiff > settings.dayTolerance) return false;
+      // On traite principalement Bank = EVI -> Compta = Notre Virement (ou inverse, mais focus EVI en banque)
+      if (isEvi(bLabel) || isNotreVirement(bLabel)) {
+        // Chercher les candidats en face (Notre Virement si EVI, EVI si Notre Virement)
+        // Avec tolérance +/- 5 jours
+        const TARGET_TOLERANCE = 5;
 
-        // Condition 2: Libellés Spécifiques
-        const bLabel = bItem.label.toUpperCase();
-        const aLabel = aItem.label.toUpperCase();
-        const isEvi = (l: string) => l.includes('EVI') || l.includes('REMISE');
-        const isNotreVirement = (l: string) => l.includes('NOTRE VIREMENT');
+        const candidates = normAcc.filter(aItem => {
+          if (aItem.matched) return false;
+          const aLabel = aItem.label.toUpperCase();
+          // Si Banque est EVI, on veut Notre Virement en face, et vice versa
+          const isCompatible = (isEvi(bLabel) && isNotreVirement(aLabel)) || (isNotreVirement(bLabel) && isEvi(aLabel));
+          if (!isCompatible) return false;
 
-        if ((isEvi(bLabel) && isNotreVirement(aLabel)) || (isNotreVirement(bLabel) && isEvi(aLabel))) return true;
-
-        return false;
-      });
-
-      if (matchIndex !== -1) {
-        normAcc[matchIndex].matched = true;
-        bItem.matched = true;
-        matches.push({
-          type: 'Specifique',
-          bank: bItem,
-          relatedBankIds: [bItem.id],
-          bankItems: [bItem],
-          accItems: [normAcc[matchIndex]],
-          deltaDays: Math.floor(Math.abs(bItem.date.getTime() - normAcc[matchIndex].date.getTime()) / (1000 * 60 * 60 * 24))
+          const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
+          return dateDiff <= TARGET_TOLERANCE;
         });
+
+        // Tentative 1-1
+        const exactMatch = candidates.find(c => Math.abs(c.amount - bItem.amount) < 0.005);
+        if (exactMatch) {
+          exactMatch.matched = true;
+          bItem.matched = true;
+          matches.push({
+            type: 'Specifique (1-1)',
+            bank: bItem,
+            relatedBankIds: [bItem.id],
+            bankItems: [bItem],
+            accItems: [exactMatch],
+            deltaDays: Math.floor(Math.abs(bItem.date.getTime() - exactMatch.date.getTime()) / (1000 * 60 * 60 * 24))
+          });
+          return;
+        }
+
+        // Tentative 1-N (Une ligne EVI banque = Somme de plusieurs lignes Compta)
+        // On groupe les candidats par jour ou on essaie de sommer tous les candidats valides ?
+        // L'user dit "plusieurs ecriture de la meme date a plus ou moins 5 jours".
+        // Simplification: On tente de voir si la SOMME de tous les candidats (ou un sous-groupe par date) match.
+
+        if (candidates.length > 1) {
+          // Essayons de grouper par date côté comptable
+          const groupsByDate: any = {};
+          candidates.forEach(c => {
+            const dateKey = c.date.toDateString();
+            if (!groupsByDate[dateKey]) groupsByDate[dateKey] = [];
+            groupsByDate[dateKey].push(c);
+          });
+
+          for (const dateKey in groupsByDate) {
+            const group = groupsByDate[dateKey];
+            const groupSum = group.reduce((sum: number, item: any) => sum + item.amount, 0);
+            if (Math.abs(groupSum - bItem.amount) < 0.005) {
+              bItem.matched = true;
+              group.forEach((g: any) => g.matched = true);
+              matches.push({
+                type: 'Specifique (1-N)',
+                bank: bItem,
+                relatedBankIds: [bItem.id],
+                bankItems: [bItem],
+                accItems: group,
+                deltaDays: Math.floor(Math.abs(bItem.date.getTime() - group[0].date.getTime()) / (1000 * 60 * 60 * 24))
+              });
+              return;
+            }
+          }
+        }
       }
     });
+
+    // --- PASSE 0.5 : L'inverse (Si EVI est en compta et Notre Virement en banque - moins probable mais possible) ---
+    // (Non implémenté pour simplifier, le code ci-dessus gère le matching symétrique 1-1 mais focus 1-N EVI Banque)
+
 
     // --- PASSE 1 : Matching 1 pour 1 (Exact) ---
     normBank.forEach(bItem => {
@@ -465,34 +512,71 @@ export default function RapprochementApp() {
 
     // --- LOGIQUE DE MATCHING (Répliquée/Adaptée) ---
 
-    // PASSE 0 : Matches Spécifiques
+    // PASSE 0 : Matches Spécifiques (Updated for Incremental)
     currentUnmatchedBank.forEach(bItem => {
       if (bItem.matched) return;
-      const matchIndex = currentUnmatchedAcc.findIndex(aItem => {
-        if (aItem.matched) return false;
-        const amountDiff = Math.abs(bItem.amount - aItem.amount);
-        const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
-        if (amountDiff > 0.005 || dateDiff > settings.dayTolerance) return false;
 
-        const bLabel = bItem.label.toUpperCase();
-        const aLabel = aItem.label.toUpperCase();
-        const isEvi = (l: string) => l.includes('EVI') || l.includes('REMISE');
-        const isNotreVirement = (l: string) => l.includes('NOTRE VIREMENT');
+      const isEvi = (l: string) => l.toUpperCase().includes('EVI') || l.toUpperCase().includes('REMISE');
+      const isNotreVirement = (l: string) => l.toUpperCase().includes('NOTRE VIREMENT');
 
-        if ((isEvi(bLabel) && isNotreVirement(aLabel)) || (isNotreVirement(bLabel) && isEvi(aLabel))) return true;
-        return false;
-      });
-      if (matchIndex !== -1) {
-        currentUnmatchedAcc[matchIndex].matched = true;
-        bItem.matched = true;
-        newMatches.push({
-          type: 'Specifique (Relance)',
-          bank: bItem,
-          relatedBankIds: [bItem.id],
-          bankItems: [bItem],
-          accItems: [currentUnmatchedAcc[matchIndex]],
-          deltaDays: Math.floor(Math.abs(bItem.date.getTime() - currentUnmatchedAcc[matchIndex].date.getTime()) / (1000 * 60 * 60 * 24))
+      const bLabel = bItem.label.toUpperCase();
+
+      if (isEvi(bLabel) || isNotreVirement(bLabel)) {
+        const TARGET_TOLERANCE = 5;
+
+        const candidates = currentUnmatchedAcc.filter(aItem => {
+          if (aItem.matched) return false;
+          const aLabel = aItem.label.toUpperCase();
+          const isCompatible = (isEvi(bLabel) && isNotreVirement(aLabel)) || (isNotreVirement(bLabel) && isEvi(aLabel));
+          if (!isCompatible) return false;
+
+          const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
+          return dateDiff <= TARGET_TOLERANCE;
         });
+
+        // 1-1
+        const exactMatch = candidates.find(c => Math.abs(c.amount - bItem.amount) < 0.005);
+        if (exactMatch) {
+          exactMatch.matched = true;
+          bItem.matched = true;
+          newMatches.push({
+            type: 'Specifique (Relance 1-1)',
+            bank: bItem,
+            relatedBankIds: [bItem.id],
+            bankItems: [bItem],
+            accItems: [exactMatch],
+            deltaDays: Math.floor(Math.abs(bItem.date.getTime() - exactMatch.date.getTime()) / (1000 * 60 * 60 * 24))
+          });
+          return;
+        }
+
+        // 1-N
+        if (candidates.length > 1) {
+          const groupsByDate: any = {};
+          candidates.forEach(c => {
+            const dateKey = c.date.toDateString();
+            if (!groupsByDate[dateKey]) groupsByDate[dateKey] = [];
+            groupsByDate[dateKey].push(c);
+          });
+
+          for (const dateKey in groupsByDate) {
+            const group = groupsByDate[dateKey];
+            const groupSum = group.reduce((sum: number, item: any) => sum + item.amount, 0);
+            if (Math.abs(groupSum - bItem.amount) < 0.005) {
+              bItem.matched = true;
+              group.forEach((g: any) => g.matched = true);
+              newMatches.push({
+                type: 'Specifique (Relance 1-N)',
+                bank: bItem,
+                relatedBankIds: [bItem.id],
+                bankItems: [bItem],
+                accItems: group,
+                deltaDays: Math.floor(Math.abs(bItem.date.getTime() - group[0].date.getTime()) / (1000 * 60 * 60 * 24))
+              });
+              return;
+            }
+          }
+        }
       }
     });
 
@@ -711,6 +795,26 @@ export default function RapprochementApp() {
 
     setResults(prev => ({
       matches: [newMatch, ...prev.matches],
+      unmatchedBank: prev.unmatchedBank.filter(t => !selectedIds.has(t.id)),
+      unmatchedAcc: prev.unmatchedAcc.filter(t => !selectedIds.has(t.id))
+    }));
+    setSelectedIds(new Set());
+    setResults(prev => ({
+      matches: [newMatch, ...prev.matches],
+      unmatchedBank: prev.unmatchedBank.filter(t => !selectedIds.has(t.id)),
+      unmatchedAcc: prev.unmatchedAcc.filter(t => !selectedIds.has(t.id))
+    }));
+    setSelectedIds(new Set());
+  };
+
+  const handleIgnore = () => {
+    const newIgnored = new Set(ignoredIds);
+    selectedIds.forEach(id => newIgnored.add(id));
+    setIgnoredIds(newIgnored);
+
+    // Remove from unmatched lists directly
+    setResults(prev => ({
+      ...prev,
       unmatchedBank: prev.unmatchedBank.filter(t => !selectedIds.has(t.id)),
       unmatchedAcc: prev.unmatchedAcc.filter(t => !selectedIds.has(t.id))
     }));
@@ -1116,15 +1220,23 @@ export default function RapprochementApp() {
                   </span>
                 </div>
 
-                {Math.abs(selectionTotals.totalBank - selectionTotals.totalAcc) < 0.005 && (
-                  <button
-                    onClick={handleManualMatch}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-colors animate-in zoom-in"
-                  >
-                    <Check size={18} />
-                    Rapprocher
-                  </button>
+                <button
+                  onClick={handleManualMatch}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-colors animate-in zoom-in"
+                >
+                  <Check size={18} />
+                  Rapprocher
+                </button>
                 )}
+
+                <button
+                  onClick={handleIgnore}
+                  className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-colors ml-2"
+                  title="Retirer ces lignes du rapprochement (ignorer)"
+                >
+                  <Trash2 size={18} />
+                  Ignorer
+                </button>
 
                 <button onClick={() => setSelectedIds(new Set())} className="ml-2 p-2 hover:bg-slate-800 rounded-full transition-colors">
                   <X size={20} className="text-slate-400" />
