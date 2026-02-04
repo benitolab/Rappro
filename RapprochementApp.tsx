@@ -333,200 +333,174 @@ export default function RapprochementApp() {
   };
 
   const getRowAmount = (row: any, mapping: any) => {
-    if (mapping.mode === 'split') {
-      const debit = cleanAmount(row[mapping.debit]);
-      const credit = cleanAmount(row[mapping.credit]);
-      return credit - debit;
+    try {
+      if (mapping.mode === 'split') {
+        const debit = cleanAmount(row[mapping.debit]);
+        const credit = cleanAmount(row[mapping.credit]);
+        return credit - debit;
+      }
+      return cleanAmount(row[mapping.amount]);
+    } catch (e) {
+      console.error("Error getting amount", e);
+      return 0;
     }
-    return cleanAmount(row[mapping.amount]);
   };
 
   const runReconciliation = () => {
-    setSelectedIds(new Set()); // Reset selection on new run
-    setSearchQuery(""); // Reset search
-    const matches: any[] = [];
-    let unmatchedBank: any[] = [];
-    let unmatchedAcc: any[] = [];
+    try {
+      setSelectedIds(new Set()); // Reset selection on new run
+      setSearchQuery(""); // Reset search
+      const matches: any[] = [];
+      let unmatchedBank: any[] = [];
+      let unmatchedAcc: any[] = [];
 
-    // --- Préparation des données ---
-    // On filtre les montants ~0 lors de la préparation
-    const normBank = bankData.map(item => ({
-      original: item,
-      id: 'bank-' + item._id, // Préfixe pour unicité
-      date: parseDate(item[bankMapping.date]),
-      amount: getRowAmount(item, bankMapping) || 0,
-      label: bankMapping.label ? item[bankMapping.label] : 'Sans libellé',
-      matched: false
-    })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has(item.id));
+      // --- Préparation des données ---
+      const normBank = bankData.map(item => {
+        const d = parseDate(item[bankMapping.date]);
+        return {
+          original: item,
+          id: 'bank-' + item._id,
+          date: isNaN(d.getTime()) ? new Date(0) : d,
+          amount: getRowAmount(item, bankMapping) || 0,
+          label: bankMapping.label ? item[bankMapping.label] : 'Sans libellé',
+          matched: false
+        };
+      }).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has(item.id));
 
-    const normAcc = accData.map(item => ({
-      original: item,
-      id: 'acc-' + item._id, // Préfixe pour unicité
-      date: parseDate(item[accMapping.date]),
-      amount: (getRowAmount(item, accMapping) || 0) * (settings.invertAccSign ? -1 : 1),
-      label: accMapping.label ? item[accMapping.label] : 'Sans libellé',
-      matched: false
-    })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has(item.id));
+      const normAcc = accData.map(item => {
+        const d = parseDate(item[accMapping.date]);
+        return {
+          original: item,
+          id: 'acc-' + item._id,
+          date: isNaN(d.getTime()) ? new Date(0) : d,
+          amount: (getRowAmount(item, accMapping) || 0) * (settings.invertAccSign ? -1 : 1),
+          label: accMapping.label ? item[accMapping.label] : 'Sans libellé',
+          matched: false
+        };
+      }).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has(item.id));
 
-    // --- PASSE 0 : Matches Spécifiques (EVI / Notre Virement) ---
-    // Demande utilisateur : "FICHIER EVI REMISE EN BANQUE" correspond à "NOTRE VIREMENT"
-    // Supporte 1-1 et 1-to-N avec tolérance 5 jours
-    normBank.forEach(bItem => {
-      if (bItem.matched) return;
+      // --- PASSE 0 : Matches Spécifiques ---
+      normBank.forEach(bItem => {
+        if (bItem.matched) return;
+        const bLabel = (bItem.label || '').toUpperCase();
+        const isEvi = (l: string) => l.includes('EVI') || l.includes('REMISE');
+        const isNotreVirement = (l: string) => l.includes('NOTRE VIREMENT');
 
-      const isEvi = (l: string) => l.toUpperCase().includes('EVI') || l.toUpperCase().includes('REMISE');
-      const isNotreVirement = (l: string) => l.toUpperCase().includes('NOTRE VIREMENT');
+        if (isEvi(bLabel) || isNotreVirement(bLabel)) {
+          const TARGET_TOLERANCE = 5;
+          const candidates = normAcc.filter(aItem => {
+            if (aItem.matched) return false;
+            const aLabel = (aItem.label || '').toUpperCase();
+            const isCompatible = (isEvi(bLabel) && isNotreVirement(aLabel)) || (isNotreVirement(bLabel) && isEvi(aLabel));
+            if (!isCompatible) return false;
+            const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
+            return dateDiff <= TARGET_TOLERANCE;
+          });
 
-      const bLabel = bItem.label.toUpperCase();
+          const exactMatch = candidates.find(c => Math.abs(c.amount - bItem.amount) < 0.005);
+          if (exactMatch) {
+            exactMatch.matched = true;
+            bItem.matched = true;
+            matches.push({
+              type: 'Specifique (1-1)',
+              bank: bItem,
+              relatedBankIds: [bItem.id],
+              bankItems: [bItem],
+              accItems: [exactMatch],
+              deltaDays: Math.floor(Math.abs(bItem.date.getTime() - exactMatch.date.getTime()) / (1000 * 60 * 60 * 24))
+            });
+            return;
+          }
 
-      // On traite principalement Bank = EVI -> Compta = Notre Virement (ou inverse, mais focus EVI en banque)
-      if (isEvi(bLabel) || isNotreVirement(bLabel)) {
-        // Chercher les candidats en face (Notre Virement si EVI, EVI si Notre Virement)
-        // Avec tolérance +/- 5 jours
-        const TARGET_TOLERANCE = 5;
+          if (candidates.length > 1) {
+            const groupsByDate: any = {};
+            candidates.forEach(c => {
+              const dateKey = c.date.toDateString();
+              if (!groupsByDate[dateKey]) groupsByDate[dateKey] = [];
+              groupsByDate[dateKey].push(c);
+            });
+            for (const dateKey in groupsByDate) {
+              const group = groupsByDate[dateKey];
+              const groupSum = group.reduce((sum: number, item: any) => sum + item.amount, 0);
+              if (Math.abs(groupSum - bItem.amount) < 0.005) {
+                bItem.matched = true;
+                group.forEach((g: any) => g.matched = true);
+                matches.push({
+                  type: 'Specifique (1-N)',
+                  bank: bItem,
+                  relatedBankIds: [bItem.id],
+                  bankItems: [bItem],
+                  accItems: group,
+                  deltaDays: Math.floor(Math.abs(bItem.date.getTime() - group[0].date.getTime()) / (1000 * 60 * 60 * 24))
+                });
+                return;
+              }
+            }
+          }
+        }
+      });
 
-        const candidates = normAcc.filter(aItem => {
+      // --- PASSE 1 : 1-1 ---
+      normBank.forEach(bItem => {
+        if (bItem.matched) return;
+        const matchIndex = normAcc.findIndex(aItem => {
           if (aItem.matched) return false;
-          const aLabel = aItem.label.toUpperCase();
-          // Si Banque est EVI, on veut Notre Virement en face, et vice versa
-          const isCompatible = (isEvi(bLabel) && isNotreVirement(aLabel)) || (isNotreVirement(bLabel) && isEvi(aLabel));
-          if (!isCompatible) return false;
-
-          const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
-          return dateDiff <= TARGET_TOLERANCE;
+          return Math.abs(bItem.amount - aItem.amount) < 0.005 &&
+            Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24) <= settings.dayTolerance;
         });
-
-        // Tentative 1-1
-        const exactMatch = candidates.find(c => Math.abs(c.amount - bItem.amount) < 0.005);
-        if (exactMatch) {
-          exactMatch.matched = true;
+        if (matchIndex !== -1) {
+          normAcc[matchIndex].matched = true;
           bItem.matched = true;
           matches.push({
-            type: 'Specifique (1-1)',
+            type: '1-1',
             bank: bItem,
             relatedBankIds: [bItem.id],
             bankItems: [bItem],
-            accItems: [exactMatch],
-            deltaDays: Math.floor(Math.abs(bItem.date.getTime() - exactMatch.date.getTime()) / (1000 * 60 * 60 * 24))
+            accItems: [normAcc[matchIndex]],
+            deltaDays: Math.floor(Math.abs(bItem.date.getTime() - normAcc[matchIndex].date.getTime()) / (1000 * 60 * 60 * 24))
           });
-          return;
         }
+      });
 
-        // Tentative 1-N (Une ligne EVI banque = Somme de plusieurs lignes Compta)
-        // On groupe les candidats par jour ou on essaie de sommer tous les candidats valides ?
-        // L'user dit "plusieurs ecriture de la meme date a plus ou moins 5 jours".
-        // Simplification: On tente de voir si la SOMME de tous les candidats (ou un sous-groupe par date) match.
-
+      // --- PASSE 2 : 1-N ---
+      normBank.forEach(bItem => {
+        if (bItem.matched) return;
+        const candidates = normAcc.filter(aItem => !aItem.matched &&
+          Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24) <= settings.dayTolerance);
         if (candidates.length > 1) {
-          // Essayons de grouper par date côté comptable
           const groupsByDate: any = {};
           candidates.forEach(c => {
-            const dateKey = c.date.toDateString();
-            if (!groupsByDate[dateKey]) groupsByDate[dateKey] = [];
-            groupsByDate[dateKey].push(c);
+            const dKey = c.date.toDateString();
+            if (!groupsByDate[dKey]) groupsByDate[dKey] = [];
+            groupsByDate[dKey].push(c);
           });
-
-          for (const dateKey in groupsByDate) {
-            const group = groupsByDate[dateKey];
-            const groupSum = group.reduce((sum: number, item: any) => sum + item.amount, 0);
-            if (Math.abs(groupSum - bItem.amount) < 0.005) {
+          for (const dk in groupsByDate) {
+            const group = groupsByDate[dk];
+            if (Math.abs(group.reduce((s: number, i: any) => s + i.amount, 0) - bItem.amount) < 0.005) {
               bItem.matched = true;
               group.forEach((g: any) => g.matched = true);
               matches.push({
-                type: 'Specifique (1-N)',
+                type: '1-N',
                 bank: bItem,
                 relatedBankIds: [bItem.id],
                 bankItems: [bItem],
                 accItems: group,
                 deltaDays: Math.floor(Math.abs(bItem.date.getTime() - group[0].date.getTime()) / (1000 * 60 * 60 * 24))
               });
-              return;
+              break;
             }
           }
         }
-      }
-    });
-
-    // --- PASSE 0.5 : L'inverse (Si EVI est en compta et Notre Virement en banque - moins probable mais possible) ---
-    // (Non implémenté pour simplifier, le code ci-dessus gère le matching symétrique 1-1 mais focus 1-N EVI Banque)
-
-
-    // --- PASSE 1 : Matching 1 pour 1 (Exact) ---
-    normBank.forEach(bItem => {
-      if (bItem.matched) return;
-
-      const matchIndex = normAcc.findIndex(aItem => {
-        if (aItem.matched) return false;
-
-        const amountDiff = Math.abs(bItem.amount - aItem.amount);
-        const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
-
-        return amountDiff < 0.005 && dateDiff <= settings.dayTolerance;
       });
 
-      if (matchIndex !== -1) {
-        normAcc[matchIndex].matched = true;
-        bItem.matched = true;
-        matches.push({
-          type: '1-1',
-          bank: bItem,
-          relatedBankIds: [bItem.id], // NEW: Track source ID
-          bankItems: [bItem],
-          accItems: [normAcc[matchIndex]],
-          deltaDays: Math.floor(Math.abs(bItem.date.getTime() - normAcc[matchIndex].date.getTime()) / (1000 * 60 * 60 * 24))
-        });
-      }
-    });
-
-    // --- PASSE 2 : Matching 1 pour N (Regroupement par date) ---
-    normBank.forEach(bItem => {
-      if (bItem.matched) return;
-
-      const candidates = normAcc.filter(aItem => {
-        if (aItem.matched) return false;
-        const dateDiff = Math.abs(bItem.date.getTime() - aItem.date.getTime()) / (1000 * 60 * 60 * 24);
-        return dateDiff <= settings.dayTolerance;
-      });
-
-      if (candidates.length > 1) {
-        const groupsByDate: any = {};
-        candidates.forEach(c => {
-          const dateKey = c.date.toDateString();
-          if (!groupsByDate[dateKey]) groupsByDate[dateKey] = [];
-          groupsByDate[dateKey].push(c);
-        });
-
-        for (const dateKey in groupsByDate) {
-          const group = groupsByDate[dateKey];
-          const groupSum = group.reduce((sum: number, item: any) => sum + item.amount, 0);
-
-          const amountDiff = Math.abs(bItem.amount - groupSum);
-
-          if (amountDiff < 0.005) {
-            bItem.matched = true;
-            group.forEach((g: any) => g.matched = true);
-
-            matches.push({
-              type: '1-N',
-              bank: bItem,
-              relatedBankIds: [bItem.id], // NEW: Track source ID
-              bankItems: [bItem],
-              accItems: group,
-              deltaDays: Math.floor(Math.abs(bItem.date.getTime() - group[0].date.getTime()) / (1000 * 60 * 60 * 24))
-            });
-            break;
-          }
-        }
-      }
-    });
-
-    // Finalisation
-    unmatchedBank = normBank.filter(b => !b.matched);
-    unmatchedAcc = normAcc.filter(a => !a.matched);
-
-    setResults({ matches, unmatchedBank, unmatchedAcc });
-    setStep(3);
-
+      unmatchedBank = normBank.filter(b => !b.matched);
+      unmatchedAcc = normAcc.filter(a => !a.matched);
+      setResults({ matches, unmatchedBank, unmatchedAcc });
+      setStep(3);
+    } catch (err: any) {
+      console.error("Reconciliation Error:", err);
+      alert("Une erreur est survenue lors du rapprochement : " + err.message);
+    }
   };
 
   const handleIncrementalMatch = () => {
@@ -826,12 +800,6 @@ export default function RapprochementApp() {
       deltaDays: 0
     };
 
-    setResults(prev => ({
-      matches: [newMatch, ...prev.matches],
-      unmatchedBank: prev.unmatchedBank.filter(t => !selectedIds.has(t.id)),
-      unmatchedAcc: prev.unmatchedAcc.filter(t => !selectedIds.has(t.id))
-    }));
-    setSelectedIds(new Set());
     setResults(prev => ({
       matches: [newMatch, ...prev.matches],
       unmatchedBank: prev.unmatchedBank.filter(t => !selectedIds.has(t.id)),
