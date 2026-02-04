@@ -1,7 +1,7 @@
 {
   "name": "reconcileai---rapprochement-bancaire",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "scripts": {
     "dev": "vite",

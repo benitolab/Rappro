@@ -914,7 +914,7 @@ export default function RapprochementApp() {
             <img src="/logo.svg" alt="RAPPRO FACILE Logo" className="h-16 w-auto" />
             <div>
               <h1 className="text-3xl font-bold text-indigo-900">Rapprochement Bancaire</h1>
-              <p className="text-slate-500 mt-1">Outil autonome (1-1 et Regroupements) v1.0.2</p>
+              <p className="text-slate-500 mt-1">Outil autonome (1-1 et Regroupements) v1.0.3</p>
             </div>
           </div>
           <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-full border border-slate-200 shadow-sm text-sm">
