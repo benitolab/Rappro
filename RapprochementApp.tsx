@@ -526,8 +526,7 @@ export default function RapprochementApp() {
 
     setResults({ matches, unmatchedBank, unmatchedAcc });
     setStep(3);
-    setResults({ matches, unmatchedBank, unmatchedAcc });
-    setStep(3);
+
   };
 
   const handleIncrementalMatch = () => {
