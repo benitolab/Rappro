@@ -350,23 +350,23 @@ export default function RapprochementApp() {
 
     // --- Préparation des données ---
     // On filtre les montants ~0 lors de la préparation
-    const normBank = bankData.map(row => ({
-      original: row,
-      id: 'bank-' + row._id, // Préfixe pour unicité
-      date: parseDate(row[bankMapping.date]),
-      amount: getRowAmount(row, bankMapping),
-      label: bankMapping.label ? row[bankMapping.label] : 'Sans libellé',
+    const normBank = bankData.map(item => ({
+      original: item,
+      id: 'bank-' + item._id, // Préfixe pour unicité
+      date: parseDate(item[bankMapping.date]),
+      amount: getRowAmount(item, bankMapping) || 0,
+      label: bankMapping.label ? item[bankMapping.label] : 'Sans libellé',
       matched: false
-    })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has('bank-' + row._id));
+    })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has(item.id));
 
-    const normAcc = accData.map(row => ({
-      original: row,
-      id: 'acc-' + row._id, // Préfixe pour unicité
-      date: parseDate(row[accMapping.date]),
-      amount: getRowAmount(row, accMapping) * (settings.invertAccSign ? -1 : 1),
-      label: accMapping.label ? row[accMapping.label] : 'Sans libellé',
+    const normAcc = accData.map(item => ({
+      original: item,
+      id: 'acc-' + item._id, // Préfixe pour unicité
+      date: parseDate(item[accMapping.date]),
+      amount: (getRowAmount(item, accMapping) || 0) * (settings.invertAccSign ? -1 : 1),
+      label: accMapping.label ? item[accMapping.label] : 'Sans libellé',
       matched: false
-    })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has('acc-' + row._id));
+    })).filter(item => Math.abs(item.amount) > 0.01 && !ignoredIds.has(item.id));
 
     // --- PASSE 0 : Matches Spécifiques (EVI / Notre Virement) ---
     // Demande utilisateur : "FICHIER EVI REMISE EN BANQUE" correspond à "NOTRE VIREMENT"
