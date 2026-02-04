@@ -279,6 +279,7 @@ export default function RapprochementApp() {
 
   // Search State
   const [searchQuery, setSearchQuery] = useState("");
+  const [showIgnored, setShowIgnored] = useState(false);
 
   // Helper Auto-Mapping
   const performAutoMapping = (data: any[], currentMapping: any) => {
@@ -809,6 +810,9 @@ export default function RapprochementApp() {
   };
 
   const handleIgnore = () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Voulez-vous ignorer ces ${selectedIds.size} ligne(s) ? Elles ne seront plus visibles dans les écarts.`)) return;
+
     const newIgnored = new Set(ignoredIds);
     selectedIds.forEach(id => newIgnored.add(id));
     setIgnoredIds(newIgnored);
@@ -820,6 +824,49 @@ export default function RapprochementApp() {
       unmatchedAcc: prev.unmatchedAcc.filter(t => !selectedIds.has(t.id))
     }));
     setSelectedIds(new Set());
+  };
+
+  const handleRestoreIgnored = (id: string) => {
+    const newIgnored = new Set(ignoredIds);
+    newIgnored.delete(id);
+    setIgnoredIds(newIgnored);
+
+    // After restoring, we need to re-run or manually add back to results.
+    // For simplicity, let's look in the raw data to restore the items.
+    // This is safer via a re-run but user might lose manual matches.
+    // Alternative: We manually find the item and push it back to unmatched.
+
+    const restoredBank = bankData.find(d => `bank-${d._id}` === id);
+    if (restoredBank) {
+      const norm = {
+        original: restoredBank,
+        id: id,
+        date: parseDate(restoredBank[bankMapping.date]),
+        amount: getRowAmount(restoredBank, bankMapping) || 0,
+        label: bankMapping.label ? restoredBank[bankMapping.label] : 'Sans libellé',
+        matched: false
+      };
+      setResults(prev => ({
+        ...prev,
+        unmatchedBank: [...prev.unmatchedBank, norm].sort((a, b) => a.date.getTime() - b.date.getTime())
+      }));
+    }
+
+    const restoredAcc = accData.find(d => `acc-${d._id}` === id);
+    if (restoredAcc) {
+      const norm = {
+        original: restoredAcc,
+        id: id,
+        date: parseDate(restoredAcc[accMapping.date]),
+        amount: (getRowAmount(restoredAcc, accMapping) || 0) * (settings.invertAccSign ? -1 : 1),
+        label: accMapping.label ? restoredAcc[accMapping.label] : 'Sans libellé',
+        matched: false
+      };
+      setResults(prev => ({
+        ...prev,
+        unmatchedAcc: [...prev.unmatchedAcc, norm].sort((a, b) => a.date.getTime() - b.date.getTime())
+      }));
+    }
   };
 
   const handleUnmatch = (match: any) => {
@@ -1296,6 +1343,55 @@ export default function RapprochementApp() {
                 <button onClick={() => setSelectedIds(new Set())} className="ml-2 p-2 hover:bg-slate-800 rounded-full transition-colors">
                   <X size={20} className="text-slate-400" />
                 </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Section de réintégration des lignes ignorées */}
+        {step === 3 && (
+          <div className="pt-8 border-t border-slate-200 mt-12 pb-12">
+            <button
+              onClick={() => setShowIgnored(!showIgnored)}
+              className="flex items-center gap-2 text-slate-400 hover:text-slate-600 transition-colors text-sm font-medium mx-auto"
+            >
+              <Trash2 size={16} />
+              {showIgnored ? "Masquer les lignes ignorées" : `Afficher les lignes ignorées (${ignoredIds.size})`}
+            </button>
+
+            {showIgnored && ignoredIds.size > 0 && (
+              <div className="mt-4 animate-in fade-in slide-in-from-top-2">
+                <Card className="max-w-4xl mx-auto overflow-hidden border-dashed border-2">
+                  <div className="p-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                    <span className="text-xs font-bold text-slate-500 uppercase font-mono">Archives des lignes ignorées</span>
+                    <button onClick={() => { setIgnoredIds(new Set()); setShowIgnored(false); }} className="text-xs text-red-500 hover:underline">Vider tout</button>
+                  </div>
+                  <div className="max-h-60 overflow-auto">
+                    <table className="w-full text-xs text-left">
+                      <thead className="bg-slate-50 text-slate-400 sticky top-0">
+                        <tr>
+                          <th className="px-4 py-2">Identifiant</th>
+                          <th className="px-4 py-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {Array.from(ignoredIds).map((id: string) => (
+                          <tr key={id} className="hover:bg-slate-50/50">
+                            <td className="px-4 py-2 text-slate-400 font-mono">{id}</td>
+                            <td className="px-4 py-2 text-right">
+                              <button
+                                onClick={() => handleRestoreIgnored(id)}
+                                className="text-indigo-600 hover:text-indigo-800 font-bold"
+                              >
+                                Réintégrer
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
               </div>
             )}
           </div>
